@@ -303,6 +303,8 @@ services:
 
 networks:
   data:
+    name: dtk-network-data
     internal: true
-  edge: {}
+  edge:
+    name: dtk-network-edge
 
