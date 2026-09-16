@@ -301,6 +301,13 @@ services:
         max-size: "10m"
         max-file: "3"
 
+networks:
+  data:
+    name: dtk-network-data
+    internal: true
+  edge:
+    name: dtk-network-edge
+
 volumes:
   postgres-data:
     driver: local
@@ -326,11 +333,4 @@ volumes:
       type: none
       o: bind
       device: /data/volume/dtk/media
-
-networks:
-  data:
-    name: dtk-network-data
-    internal: true
-  edge:
-    name: dtk-network-edge
 
