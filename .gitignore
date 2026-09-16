@@ -20,7 +20,7 @@ htmlcov/
 
 # Local config & secrets
 # Cookies and tokens are per-deployment; never commit them.
-.env
+#.env 内网使用
 .env.*
 !.env.example
 *.local.yaml
