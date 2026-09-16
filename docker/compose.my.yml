@@ -1,0 +1,308 @@
+name: dtk
+
+x-app-image: &app-image
+  image: ${DTK_IMAGE:-dtk-app}:${DTK_IMAGE_TAG:-dev}
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    args:
+      PYTHON_VERSION: "3.12.8"
+
+x-app-env: &app-env
+  env_file:
+    - path: ../.env
+      required: false
+
+x-app-limits: &app-limits
+  mem_limit: 512m
+  memswap_limit: 512m
+  cpus: 2.0
+  pids_limit: 256
+
+x-app-hardening: &app-hardening
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-app-backups: &app-backups
+  volumes:
+    - /data/volume/dtk/backups:/var/lib/dtk/backups
+  environment:
+    DTK_BACKUP_DIR: /var/lib/dtk/backups
+
+x-app: &app
+  <<: [*app-image, *app-env, *app-hardening, *app-backups, *app-limits]
+
+services:
+  postgres:
+    mem_limit: 2g
+    pids_limit: 256
+    image: timescale/timescaledb-ha:pg17
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DTK_SECRET_KEY: ""
+      POSTGRES_DB: dtk
+      POSTGRES_USER: dtk
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    volumes:
+      - /data/volume/dtk/postgres:/home/postgres/pgdata/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dtk -d dtk"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 1m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    mem_limit: 512m
+    pids_limit: 128
+    image: redis:8-alpine
+    user: redis
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DTK_SECRET_KEY: ""
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$REDIS_PASSWORD" ]; then
+          echo "redis: REDIS_PASSWORD is empty; write .env first (see docker/README.md)" >&2
+          exit 1
+        fi
+        exec redis-server \
+          --requirepass "$$REDIS_PASSWORD" \
+          --appendonly yes \
+          --save 60 1 \
+          --maxmemory ${DTK_REDIS_MAXMEMORY:-320mb} \
+          --maxmemory-policy volatile-lru
+    volumes:
+      - /data/volume/dtk/redis:/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  migrate:
+    <<: *app
+    command: ["migrate"]
+    networks:
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *app
+    command: ["api"]
+    environment:
+      DTK_BIND_HOST: "0.0.0.0"
+      DTK_BIND_PORT: "8000"
+      DTK_CONSOLE_DIR: /app/web/dist
+      DTK_BACKUP_DIR: /var/lib/dtk/backups
+      DTK_MEDIA_DIR: /var/lib/dtk/media
+    volumes:
+      - /data/volume/dtk/backups:/var/lib/dtk/backups
+      - /data/volume/dtk/media:/var/lib/dtk/media:ro
+    ports:
+      - "${DTK_BIND_HOST:-127.0.0.1}:${DTK_BIND_PORT:-8000}:8000"
+    networks:
+      - data
+      - edge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          with urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=3) as r:
+              sys.exit(0 if r.status == 200 else 1)
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    networks:
+      - data
+      - edge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import os, socket, sys, urllib.parse
+          url = urllib.parse.urlparse(os.environ.get("DTK_REDIS_URL", "redis://redis:6379/0"))
+          socket.create_connection((url.hostname or "redis", url.port or 6379), 5).close()
+          sys.exit(0)
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+  browser-rpc:
+    mem_limit: 4g
+    cpus: 4.0
+    pids_limit: 1024
+    profiles:
+      - browser
+    image: dtk-browser-rpc:${DTK_IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.browser
+      args:
+        CLOAKBROWSER_REPO: ${CLOAKBROWSER_REPO:-https://github.com/CloakHQ/cloakbrowser}
+        CLOAKBROWSER_COMMIT: ${CLOAKBROWSER_COMMIT:-}
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DTK_SECRET_KEY: ""
+      DTK_BROWSER_BIND_HOST: "0.0.0.0"
+      DTK_BROWSER_BIND_PORT: "9000"
+      DTK_BROWSER_PROFILE_ROOT: /profiles
+    expose:
+      - "9000"
+    networks:
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp:size=3g,mode=1777
+      - /profiles:size=1g,mode=0700,uid=10001,gid=10001
+    shm_size: 1gb
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json, sys, urllib.request
+          with urllib.request.urlopen("http://127.0.0.1:9000/rpc/health", timeout=5) as r:
+              body = json.load(r)
+          sys.exit(0 if r.status == 200 and body.get("status") == "ok" else 1)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  downloader:
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 2.0
+    pids_limit: 128
+    profiles:
+      - downloader
+    image: ${DTK_DOWNLOADER_IMAGE:-dtk-downloader}:${DTK_IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.downloader
+      args:
+        VERSION: ${DTK_IMAGE_TAG:-dev}
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DTK_SECRET_KEY: ""
+      DTK_DATABASE_URL: ""
+      DTK_REDIS_URL: ""
+      DTK_DOWNLOADER_BIND: "0.0.0.0:9100"
+      DTK_DOWNLOADER_ROOT: /var/lib/dtk/media
+    expose:
+      - "9100"
+    networks:
+      - edge
+    volumes:
+      - /data/volume/dtk/media:/var/lib/dtk/media
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/downloader", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  data:
+    internal: true
+  edge: {}
+
