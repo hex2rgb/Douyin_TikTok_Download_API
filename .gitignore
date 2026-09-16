@@ -61,3 +61,4 @@ dist/
 # nothing and would be wrong for every architecture but the one that made it.
 /docker/downloader/downloader
 /Depoly_SSH/
+/.codegraph/
