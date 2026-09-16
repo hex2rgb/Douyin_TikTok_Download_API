@@ -35,7 +35,7 @@ x-app-hardening: &app-hardening
 
 x-app-backups: &app-backups
   volumes:
-    - /data/volume/dtk/backups:/var/lib/dtk/backups
+    - backup-data:/var/lib/dtk/backups
   environment:
     DTK_BACKUP_DIR: /var/lib/dtk/backups
 
@@ -56,7 +56,7 @@ services:
       POSTGRES_USER: dtk
       POSTGRES_HOST_AUTH_METHOD: scram-sha-256
     volumes:
-      - /data/volume/dtk/postgres:/home/postgres/pgdata/data
+      - postgres-data:/home/postgres/pgdata/data
     networks:
       - data
     healthcheck:
@@ -98,7 +98,7 @@ services:
           --maxmemory ${DTK_REDIS_MAXMEMORY:-320mb} \
           --maxmemory-policy volatile-lru
     volumes:
-      - /data/volume/dtk/redis:/data
+      - redis-data:/data
     networks:
       - data
     healthcheck:
@@ -135,8 +135,8 @@ services:
       DTK_BACKUP_DIR: /var/lib/dtk/backups
       DTK_MEDIA_DIR: /var/lib/dtk/media
     volumes:
-      - /data/volume/dtk/backups:/var/lib/dtk/backups
-      - /data/volume/dtk/media:/var/lib/dtk/media:ro
+      - backup-data:/var/lib/dtk/backups
+      - media-data:/var/lib/dtk/media:ro
     ports:
       - "${DTK_BIND_HOST:-127.0.0.1}:${DTK_BIND_PORT:-8000}:8000"
     networks:
@@ -281,7 +281,7 @@ services:
     networks:
       - edge
     volumes:
-      - /data/volume/dtk/media:/var/lib/dtk/media
+      - media-data:/var/lib/dtk/media
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -300,6 +300,32 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  postgres-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/volume/dtk/postgres
+  redis-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/volume/dtk/redis
+  backup-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/volume/dtk/backups
+  media-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/volume/dtk/media
 
 networks:
   data:
